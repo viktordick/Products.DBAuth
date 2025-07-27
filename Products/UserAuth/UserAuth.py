@@ -1,26 +1,25 @@
 #!/usr/bin/python
 
 import uuid
+import json
+import datetime
 
 from AuthEncoding.AuthEncoding import pw_validate
+from AccessControl.Permissions import manage_users
 from AccessControl import ClassSecurityInfo
 from AccessControl.users import BasicUser
 from AccessControl.SimpleObjectPolicies import _noroles
 from AccessControl.class_init import InitializeClass
-from OFS.ObjectManager import ObjectManager
 from OFS.userfolder import BasicUserFolder
 from ZPublisher import zpublish
 from Products.PageTemplates.PageTemplateFile import PageTemplateFile
 
 from zope.sqlalchemy import register
-from sqlalchemy import create_engine, select, func, insert, ForeignKey
+import sqlalchemy
+from sqlalchemy import create_engine, func, ForeignKey, DateTime
+from sqlalchemy import select, insert, update
 from sqlalchemy.orm import sessionmaker, scoped_session, DeclarativeBase
 from sqlalchemy.orm import Mapped, mapped_column, Session
-
-
-engine = create_engine("postgresql+psycopg://zope@/zope")
-DBSession = scoped_session(sessionmaker(bind=engine))
-register(DBSession)
 
 
 class Base(DeclarativeBase):
@@ -40,6 +39,8 @@ class AppUserLogin(Base):
     appuser_id: Mapped[int] = mapped_column('appuserlogin_appuser_id',
                                             ForeignKey('appuser.appuser_id'))
     cookie: Mapped[str] = mapped_column('appuserlogin_cookie')
+    end: Mapped[datetime.datetime] = mapped_column('appuserlogin_end',
+                                                   DateTime(timezone=True))
 
 
 class User(BasicUser):
@@ -90,30 +91,48 @@ class UserAuth(BasicUserFolder):
     zmi_show_add_dialog = False
     security = ClassSecurityInfo()
     security.declareProtected('View management screens', 'manage_main')
-    security.declareProtected('Manage users', 'getUserNames')
 
-    manage_options = (
-        ObjectManager.manage_options[0:1]
-        + BasicUserFolder.manage_options[2:]
-    )
+    manage_main = PageTemplateFile('zpt/main', globals())
+    manage_workspace = manage_main
+
+    manage_options = []
+
+    _connstr = "postgresql+psycopg://zope@/zope"
+
+    def __init__(self, connstr=None):
+        if connstr:
+            self._connstr = connstr
+
+    @security.protected(manage_users)
+    def connstr(self):
+        "Return connection string"
+        return self._connstr
+
+    def _session(self):
+        """
+        Get SQLAlchemy session.
+        If the connection string changed, disconnects everything and creates a
+        new engine and scoped session.
+        """
+        engine = getattr(self, '_v_sqlalchemy_engine', None)
+        if engine and engine.url.render_as_string() != self._connstr:
+            self._v_sqlalchemy_session.expire_all()
+            engine = None
+        if not engine:
+            engine = create_engine(self._connstr)
+            session = scoped_session(sessionmaker(bind=engine))
+            self._v_sqlalchemy_engine = engine
+            self._v_sqlalchemy_session = session
+            register(session)
+        return self._v_sqlalchemy_session()
 
     def _exec(self, stmt):
-        return list(DBSession().scalars(stmt))
-
-    def getUserNames(self):
-        """Return a list of usernames"""
-        return []
-
-    def getUser(self, name):
-        """Return the named user object or None"""
-        users = self._exec(
-            select(AppUser)
-            .where(func.lower(AppUser.name) == name.lower())
-        )
-        if not users:
+        "Execute an SQLAlchemy statement"
+        result = self._session().execute(stmt)
+        if isinstance(result._metadata,
+                      sqlalchemy.engine.cursor._NoResultMetaData):
             return
-        user = users[0]
-        return User(user.name)
+        return result.scalars().all()
 
     def validate(self, request, auth='', roles=_noroles):
         """
@@ -128,45 +147,59 @@ class UserAuth(BasicUserFolder):
         cookie = request.cookies.get('__user_login')
         if not cookie:
             return
-        user = self._exec(
+        appuser = self._exec(
             select(AppUser)
             .join(AppUserLogin)
             .where(AppUserLogin.cookie == cookie)
+            .where(AppUserLogin.end.is_(None))
         )
-        if user:
-            user = self.getUser(user[0].name)
+        if not appuser:
+            # Delegate to next level
+            return
+        user = User(appuser[0].name)
         # We found a user and the user wasn't the emergency user.
         # We need to authorize the user against the published object.
-        if user and self.authorize(user, *context, roles):
+        if self.authorize(user, *context, roles):
             return user.__of__(self)
-        if user and self.authorize(self._nobody, *context, roles):
+        if self.authorize(self._nobody, *context, roles):
             # The user is not allowed to access this, but Anonymous is?
             return self._nobody.__of__(self)
         # Otherwise we return None, delegating to the next level
 
-    _login_form = PageTemplateFile('zpt/login_form', globals())
+    @zpublish(methods='POST')
+    @security.protected(manage_users)
+    def manage_setConnstr(self, connstr):
+        "Change connection string"
+        self._connstr = connstr
+        self.REQUEST.RESPONSE.redirect('manage_main')
 
     @zpublish
-    def login_form(self):
-        return self._login_form()
+    def login(self, username, password):
+        """
+        Check user and password and generate a cookie if successful.
+        :param username: Username to try. Note that this is checked
+            case-insensitive against the DB
+        :password: password of the user
 
-    @zpublish
-    def login_action(self, username, password):
-        """Check user and password and generate a cookie if successful."""
+        :returns: JSON encoded:
+        {
+            "success": bool, if login was successful,
+            "username": Actual username in DB
+        }
+        Side effects: If successful, an entry is added to appuserlogin and the
+        __user_login cookie is set.
+        """
         resp = self.REQUEST.RESPONSE
-        redirect = resp.redirect
-        target = self.absolute_url()
+        resp.setHeader('Content-Type', 'application/json')
         users = self._exec(
             select(AppUser)
             .where(func.lower(AppUser.name) == username.lower())
         )
         if not users:
-            redirect(target)
-            return
+            return json.dumps({'success': False})
         user = users[0]
         if not pw_validate(user.password, password):
-            redirect(target)
-            return
+            return json.dumps({'success': False})
         cookie = str(uuid.uuid4())
         self._exec(
             insert(AppUserLogin)
@@ -184,7 +217,29 @@ class UserAuth(BasicUserFolder):
             http_only=True,
             same_site='Strict',
         )
-        redirect(target)
+        return json.dumps({
+            'success': True,
+            'username': user.name,
+        })
+
+    def logout(self):
+        """
+        Log out current user.
+        Expires the login on the DB and expires the cookie.
+        """
+        cookie = self.REQUEST.cookies.get('__user_login')
+        resp = self.REQUEST.RESPONSE
+        resp.setHeader('Content-Type', 'application/json')
+        if not cookie:
+            return json.dumps({'success': False})
+        self._exec(
+            update(AppUserLogin)
+            .where(AppUserLogin.cookie == cookie)
+            .where(AppUserLogin.end.is_(None))
+            .values(end=func.now())
+        )
+        resp.expireCookie('__user_login', path='/')
+        return json.dumps({'success': True})
 
 
 def add_UserAuth(self, REQUEST=None):

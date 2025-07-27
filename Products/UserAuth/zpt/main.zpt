@@ -1,0 +1,17 @@
+<tal:x replace="structure here/manage_page_header"/>
+<tal:x replace="structure here/manage_tabs"/>
+<main class="container-fluid">
+  <form action="manage_setConnstr" method="POST">
+    <div class="zmi-controls">
+      <label class="form-label" for="connstr">Connection string</label>
+      <input class="form-control"
+             type="text"
+             id="connstr"
+             name="connstr"
+             tal:attributes="value context/connstr"
+             >
+      <button class="btn btn-primary" type="submit">Change...</button>
+    </div>
+  </form>
+</main>
+<tal:x replace="structure here/manage_page_footer"/>
