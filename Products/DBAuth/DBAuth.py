@@ -2,45 +2,23 @@
 
 import uuid
 import json
-import datetime
 
 from AuthEncoding.AuthEncoding import pw_validate
-from AccessControl.Permissions import manage_users
 from AccessControl import ClassSecurityInfo
+from AccessControl.Permissions import manage_users
 from AccessControl.users import BasicUser
 from AccessControl.SimpleObjectPolicies import _noroles
 from AccessControl.class_init import InitializeClass
 from OFS.userfolder import BasicUserFolder
-from ZPublisher import zpublish
 from Products.PageTemplates.PageTemplateFile import PageTemplateFile
+from ZPublisher import zpublish
 
-from zope.sqlalchemy import register
 import sqlalchemy
-from sqlalchemy import create_engine, func, ForeignKey, DateTime
-from sqlalchemy import select, insert, update
-from sqlalchemy.orm import sessionmaker, scoped_session, DeclarativeBase
-from sqlalchemy.orm import Mapped, mapped_column, Session
+from sqlalchemy import create_engine, func, select, insert, update
+from sqlalchemy.orm import Session, sessionmaker, scoped_session
+from zope.sqlalchemy import register
 
-
-class Base(DeclarativeBase):
-    pass
-
-
-class AppUser(Base):
-    __tablename__ = 'appuser'
-    id: Mapped[int] = mapped_column('appuser_id', primary_key=True)
-    name: Mapped[str] = mapped_column('appuser_name')
-    password: Mapped[str] = mapped_column('appuser_password')
-
-
-class AppUserLogin(Base):
-    __tablename__ = 'appuserlogin'
-    id: Mapped[int] = mapped_column('appuserlogin_id', primary_key=True)
-    appuser_id: Mapped[int] = mapped_column('appuserlogin_appuser_id',
-                                            ForeignKey('appuser.appuser_id'))
-    cookie: Mapped[str] = mapped_column('appuserlogin_cookie')
-    end: Mapped[datetime.datetime] = mapped_column('appuserlogin_end',
-                                                   DateTime(timezone=True))
+from .schema import AppUser, AppRole, AppUserXRole, AppUserLogin
 
 
 class User(BasicUser):
@@ -82,12 +60,19 @@ class User(BasicUser):
         return self.name
 
 
-class UserAuth(BasicUserFolder):
+class DBAuth(BasicUserFolder):
     """
     Product to be placed in Zope for authenticating users against the database
     using a login cookie in the database.
+    Adding this will create an acl_users object - you will want to add it to
+    some subfolder of the application root.
+    POST a request to acl_users/login with params username and password to
+    generate a login and set a login cookie - the password should be stored as
+    SSHA hash in appuser_password.
+    Afterwards, accessing with this login cookie will authenticate for all
+    access inside the folder with the roles given in appuserxgroup.
     """
-    meta_type = "User Auth"
+    meta_type = "DB Auth"
     zmi_show_add_dialog = False
     security = ClassSecurityInfo()
     security.declareProtected('View management screens', 'manage_main')
@@ -156,7 +141,16 @@ class UserAuth(BasicUserFolder):
         if not appuser:
             # Delegate to next level
             return
-        user = User(appuser[0].name)
+        username = appuser[0].name
+        approles = self._exec(
+            select(AppRole)
+            .join(AppUserXRole)
+            .where(AppUserXRole.appuser_id == appuser[0].id)
+        )
+        user = User(
+            username,
+            tuple(role.zoperole for role in approles),
+        )
         # We found a user and the user wasn't the emergency user.
         # We need to authorize the user against the published object.
         if self.authorize(user, *context, roles):
@@ -173,7 +167,7 @@ class UserAuth(BasicUserFolder):
         self._connstr = connstr
         self.REQUEST.RESPONSE.redirect('manage_main')
 
-    @zpublish
+    @zpublish(methods='POST')
     def login(self, username, password):
         """
         Check user and password and generate a cookie if successful.
@@ -242,12 +236,12 @@ class UserAuth(BasicUserFolder):
         return json.dumps({'success': True})
 
 
-def add_UserAuth(self, REQUEST=None):
-    """Add a UserAuth as acl_users"""
-    obj = UserAuth()
+def add_DBAuth(self, REQUEST=None):
+    """Add a DBAuth as acl_users"""
+    obj = DBAuth()
     self._setObject('acl_users', obj)
     if REQUEST is not None:
         REQUEST.RESPONSE.redirect(self.absolute_url() + '/manage_main')
 
 
-InitializeClass(UserAuth)
+InitializeClass(DBAuth)

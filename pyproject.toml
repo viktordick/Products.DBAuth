@@ -3,11 +3,11 @@ requires = ["setuptools>=61.2", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "Products.UserAuth"
+name = "Products.DBAuth"
 authors = [
     {name="Viktor Dick", email="viktor.dick@posteo.de"},
 ]
-description = "Provide Zope authentication against a PostgreSQL DB"
+description = "Provide Zope authentication against a relational DB"
 readme = "README.md"
 classifiers = [
     "Programming Language :: Python :: 3",
