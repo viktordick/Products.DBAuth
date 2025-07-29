@@ -74,11 +74,16 @@ class DBAuth(BasicUserFolder):
     """
     meta_type = "DB Auth"
     zmi_show_add_dialog = False
+    zmi_icon = 'far fa-id-card'
     security = ClassSecurityInfo()
     security.declareProtected('View management screens', 'manage_main')
 
-    manage_main = PageTemplateFile('zpt/main', globals())
-    manage_workspace = manage_main
+    manage_workspace = PageTemplateFile('zpt/main', globals())
+    manage = manage_main = manage_workspace
+    manage_main.__name__ = 'manage_main'
+    manage_main._need__name__ = False
+    manage.__name__ = 'manage'
+    manage._need__name__ = False
 
     manage_options = []
 
@@ -104,7 +109,10 @@ class DBAuth(BasicUserFolder):
             self._v_sqlalchemy_session.expire_all()
             engine = None
         if not engine:
-            engine = create_engine(self._connstr)
+            engine = create_engine(
+                self._connstr,
+                execution_options={"isolation_level": "AUTOCOMMIT"},
+            )
             session = scoped_session(sessionmaker(bind=engine))
             self._v_sqlalchemy_engine = engine
             self._v_sqlalchemy_session = session
