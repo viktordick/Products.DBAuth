@@ -2,6 +2,7 @@
 
 import uuid
 import json
+from contextlib import contextmanager
 
 from AuthEncoding.AuthEncoding import pw_validate
 from AccessControl import ClassSecurityInfo
@@ -14,9 +15,7 @@ from Products.PageTemplates.PageTemplateFile import PageTemplateFile
 from ZPublisher import zpublish
 from Products.SQLAlchemySession import list_sessions
 
-import sqlalchemy
 from sqlalchemy import func, select, insert, update
-from sqlalchemy.orm import Session
 
 from .schema import AppUser, AppRole, AppUserXRole, AppUserLogin
 
@@ -100,27 +99,20 @@ class DBAuth(BasicUserFolder):
     def sessions(self):
         return list_sessions(self.aq_parent)
 
-    def _session(self):
+    @zpublish(False)
+    @contextmanager
+    def session(self):
         """
         Get SQLAlchemy session from source SQL Alchemy Session object.
+        This automatically commits and closes the session after usage
         """
-        if not self._sessionsource:
-            return
         src = getattr(self.aq_parent, self._sessionsource)
-        if src is not None:
-            return src.session(autocommit=True)
+        session = src.session(bind=False)()
+        with session:
+            yield session
+            session.commit()
 
-    def _exec(self, stmt):
-        "Execute an SQLAlchemy statement"
-        session = self._session()
-        if session is None:
-            return
-        result = self._session().execute(stmt)
-        if isinstance(result._metadata,
-                      sqlalchemy.engine.cursor._NoResultMetaData):
-            return
-        return result.scalars().all()
-
+    @zpublish(False)
     def validate(self, request, auth='', roles=_noroles):
         """
         Check authentication. Here, we simply check for a login cookie and
@@ -134,25 +126,26 @@ class DBAuth(BasicUserFolder):
         cookie = request.cookies.get('__user_login')
         if not cookie:
             return
-        appuser = self._exec(
-            select(AppUser)
-            .join(AppUserLogin)
-            .where(AppUserLogin.cookie == cookie)
-            .where(AppUserLogin.end.is_(None))
-        )
-        if not appuser:
-            # Delegate to next level
-            return
-        username = appuser[0].name
-        approles = self._exec(
-            select(AppRole)
-            .join(AppUserXRole)
-            .where(AppUserXRole.appuser_id == appuser[0].id)
-        )
-        user = User(
-            username,
-            tuple(role.zoperole for role in approles),
-        )
+        with self.session() as session:
+            appuser = session.execute(
+                select(AppUser)
+                .join(AppUserLogin)
+                .where(AppUserLogin.cookie == cookie)
+                .where(AppUserLogin.end.is_(None))
+            ).scalars().all()
+            if not appuser:
+                # Delegate to next level
+                return
+            username = appuser[0].name
+            approles = session.execute(
+                select(AppRole)
+                .join(AppUserXRole)
+                .where(AppUserXRole.appuser_id == appuser[0].id)
+            ).scalars().all()
+            user = User(
+                username,
+                tuple(role.zoperole for role in approles),
+            )
         # We found a user and the user wasn't the emergency user.
         # We need to authorize the user against the published object.
         if self.authorize(user, *context, roles):
@@ -187,24 +180,25 @@ class DBAuth(BasicUserFolder):
         """
         resp = self.REQUEST.RESPONSE
         resp.setHeader('Content-Type', 'application/json')
-        users = self._exec(
-            select(AppUser)
-            .where(func.lower(AppUser.name) == username.lower())
-        )
-        if not users:
-            return json.dumps({'success': False})
-        user = users[0]
-        if not pw_validate(user.password, password):
-            return json.dumps({'success': False})
-        cookie = str(uuid.uuid4())
-        self._exec(
-            insert(AppUserLogin)
-            .values(
-                appuser_id=user.id,
-                cookie=cookie,
+        with self.session() as session:
+            users = session.execute(
+                select(AppUser)
+                .where(func.lower(AppUser.name) == username.lower())
+            ).scalars().all()
+            if not users:
+                return json.dumps({'success': False})
+            user = users[0]
+            username = user.name
+            if not pw_validate(user.password, password):
+                return json.dumps({'success': False})
+            cookie = str(uuid.uuid4())
+            session.execute(
+                insert(AppUserLogin)
+                .values(
+                    appuser_id=user.id,
+                    cookie=cookie,
+                )
             )
-        )
-        Session().commit()
         resp.setCookie(
             '__user_login',
             cookie,
@@ -215,7 +209,7 @@ class DBAuth(BasicUserFolder):
         )
         return json.dumps({
             'success': True,
-            'username': user.name,
+            'username': username,
         })
 
     def logout(self):
@@ -228,12 +222,13 @@ class DBAuth(BasicUserFolder):
         resp.setHeader('Content-Type', 'application/json')
         if not cookie:
             return json.dumps({'success': False})
-        self._exec(
-            update(AppUserLogin)
-            .where(AppUserLogin.cookie == cookie)
-            .where(AppUserLogin.end.is_(None))
-            .values(end=func.now())
-        )
+        with self.session() as session:
+            session.execute(
+                update(AppUserLogin)
+                .where(AppUserLogin.cookie == cookie)
+                .where(AppUserLogin.end.is_(None))
+                .values(end=func.now())
+            )
         resp.expireCookie('__user_login', path='/')
         return json.dumps({'success': True})
 
