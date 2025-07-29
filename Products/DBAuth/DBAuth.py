@@ -12,11 +12,11 @@ from AccessControl.class_init import InitializeClass
 from OFS.userfolder import BasicUserFolder
 from Products.PageTemplates.PageTemplateFile import PageTemplateFile
 from ZPublisher import zpublish
+from Products.SQLAlchemySession import list_sessions
 
 import sqlalchemy
-from sqlalchemy import create_engine, func, select, insert, update
-from sqlalchemy.orm import Session, sessionmaker, scoped_session
-from zope.sqlalchemy import register
+from sqlalchemy import func, select, insert, update
+from sqlalchemy.orm import Session
 
 from .schema import AppUser, AppRole, AppUserXRole, AppUserLogin
 
@@ -87,40 +87,34 @@ class DBAuth(BasicUserFolder):
 
     manage_options = []
 
-    _connstr = "postgresql+psycopg://zope@/zope"
+    _sessionsource = None
 
-    def __init__(self, connstr=None):
-        if connstr:
-            self._connstr = connstr
+    def __init__(self):
+        pass
 
-    @security.protected(manage_users)
-    def connstr(self):
-        "Return connection string"
-        return self._connstr
+    @zpublish(False)
+    def sessionsource(self):
+        return self._sessionsource
+
+    @zpublish(False)
+    def sessions(self):
+        return list_sessions(self.aq_parent)
 
     def _session(self):
         """
-        Get SQLAlchemy session.
-        If the connection string changed, disconnects everything and creates a
-        new engine and scoped session.
+        Get SQLAlchemy session from source SQL Alchemy Session object.
         """
-        engine = getattr(self, '_v_sqlalchemy_engine', None)
-        if engine and engine.url.render_as_string() != self._connstr:
-            self._v_sqlalchemy_session.expire_all()
-            engine = None
-        if not engine:
-            engine = create_engine(
-                self._connstr,
-                execution_options={"isolation_level": "AUTOCOMMIT"},
-            )
-            session = scoped_session(sessionmaker(bind=engine))
-            self._v_sqlalchemy_engine = engine
-            self._v_sqlalchemy_session = session
-            register(session)
-        return self._v_sqlalchemy_session()
+        if not self._sessionsource:
+            return
+        src = getattr(self.aq_parent, self._sessionsource)
+        if src is not None:
+            return src.session(autocommit=True)
 
     def _exec(self, stmt):
         "Execute an SQLAlchemy statement"
+        session = self._session()
+        if session is None:
+            return
         result = self._session().execute(stmt)
         if isinstance(result._metadata,
                       sqlalchemy.engine.cursor._NoResultMetaData):
@@ -170,10 +164,10 @@ class DBAuth(BasicUserFolder):
 
     @zpublish(methods='POST')
     @security.protected(manage_users)
-    def manage_setConnstr(self, connstr):
-        "Change connection string"
-        self._connstr = connstr
-        self.REQUEST.RESPONSE.redirect('manage_main')
+    def manage_edit(self, sessionsource):
+        "Change session source"
+        self._sessionsource = sessionsource
+        self.REQUEST.RESPONSE.redirect('../manage_main')
 
     @zpublish(methods='POST')
     def login(self, username, password):
@@ -253,3 +247,10 @@ def add_DBAuth(self, REQUEST=None):
 
 
 InitializeClass(DBAuth)
+
+
+def initialize(context):
+    context.registerClass(
+        DBAuth,
+        constructors=(add_DBAuth, ),
+    )

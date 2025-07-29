@@ -1,8 +1,3 @@
-from .DBAuth import DBAuth, add_DBAuth
+from .DBAuth import initialize
 
-
-def initialize(registrar):
-    registrar.registerClass(
-        DBAuth,
-        constructors=(add_DBAuth, ),
-    )
+__all__ = ['initialize']

@@ -1,15 +1,19 @@
 <tal:x replace="structure here/manage_page_header"/>
 <tal:x replace="structure here/manage_tabs"/>
 <main class="container-fluid">
-  <form action="manage_setConnstr" method="POST">
+  <form action="manage_edit" method="POST">
     <div class="zmi-controls">
-      <label class="form-label" for="connstr">Connection string</label>
-      <input class="form-control"
-             type="text"
-             id="connstr"
-             name="connstr"
-             tal:attributes="value context/connstr"
-             >
+    <label class="form-label" for="sessionsource">SQL Alchemy Session</label>
+      <select name="sessionsource"
+              id="sessionsource"
+              class="form-control"
+              tal:attributes="value context/sessionsource"
+              >
+        <option tal:repeat="option context/sessions"
+                tal:content="option"
+                tal:attributes="value option">
+        </option>
+      </select>
       <button class="btn btn-primary" type="submit">Change...</button>
     </div>
   </form>

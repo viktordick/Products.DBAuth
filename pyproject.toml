@@ -19,6 +19,7 @@ dependencies = [
     "Zope",
     "zope.sqlalchemy",
     "SQLAlchemy",
+    "Products.SQLAlchemySession",
 ]
 dynamic = ["version"]
 requires-python = ">=3.8"
